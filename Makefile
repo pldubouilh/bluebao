@@ -4,11 +4,11 @@ build:
 
 run:
 	make
-	./bluebao 2> /dev/null
+	./bluebao
 
 server-debug:
 	go build -o tempserver
-	./tempserver -readConf=true
+	./tempserver
 
 client-debug:
 	go build -o tempclient
@@ -16,10 +16,10 @@ client-debug:
 	./tempclient
 
 watch:
-	ls src/server/* src/ui/* src/utils/*  main.go | entr -rc make run
+	ls main.go | entr -rc make run
 
 watch-server:
-	ls src/server/* src/ui/* src/utils/*  main.go | entr -rc make server-debug
+	ls main.go | entr -rc make server-debug
 
 watch-client:
-	ls src/client/* src/ui/* src/utils/*  main.go | entr -rc make client-debug
+	ls main.go | entr -rc make client-debug
