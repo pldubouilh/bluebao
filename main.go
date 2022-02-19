@@ -3,152 +3,108 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/getlantern/systray"
-
-	"encoding/json"
 )
 
-type endpoint struct {
-	Macs      []string          `json:"macs"`
-	Excluding string            `json:"excluding"`
-	Onit      string            `json:"onit"`
-	Menu      *systray.MenuItem `json:"-"`
-}
+// mac address // menu
+var localEndpoints = make(map[string]*systray.MenuItem)
+var localMtx sync.Mutex
 
-var localEndpoints map[string]endpoint
-var localStateMtx sync.Mutex
-var localName string
+var hostname, _ = os.Hostname()
+var clientPort = flag.String("cp", "8830", "client port")
+var serverPort = flag.String("sp", "8829", "server port")
 
-var client net.PacketConn
-var clientAddr *net.UDPAddr
-
-func addUIEntry(name string) *systray.MenuItem {
+func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
 
 	go func() {
 		for {
 			<-m.ClickedCh
-			localStateMtx.Lock()
-			l := localEndpoints[name]
+			localMtx.Lock()
 
 			if m.Checked() {
-				disconnect(&l)
+				disconnect(mac, m)
 			} else {
-				connect(&l)
+				connect(mac, m)
 			}
 
-			localEndpoints[name] = l
-			localStateMtx.Unlock()
-			send()
+			localMtx.Unlock()
 		}
 	}()
 
 	return m
 }
 
-func merge(buf []byte) {
-
-	remoteEndpoints := make(map[string]endpoint)
-	errMarshall := json.Unmarshal(buf, &remoteEndpoints)
-	if errMarshall != nil {
-		fmt.Println("~~ failed at parsing remote state")
-		return
-	}
-
-	localStateMtx.Lock()
-	defer localStateMtx.Unlock()
-
-	for name, r := range remoteEndpoints {
-		l, ok := localEndpoints[name]
-		l.Macs = r.Macs
-		l.Excluding = r.Excluding
-
-		localConn := l.Onit == localName
-		shouldBeConned := r.Onit == localName
-
-		if !ok {
-			fmt.Println("~~ new sink", name)
-			l.Menu = addUIEntry(name)
-		}
-
-		if localConn && !shouldBeConned {
-			disconnect(&l)
-		} else if !localConn && shouldBeConned {
-			connect(&l)
-		}
-
-		l.Onit = r.Onit
-		localEndpoints[name] = l
-	}
+func disconnect(mac string, m *systray.MenuItem) {
+	m.Uncheck()
+	doBtOpRepeat("disconnect", mac)
 }
 
-func disconnect(t *endpoint) {
-	t.Menu.Uncheck()
+func connect(mac string, m *systray.MenuItem) {
+	m.Disable()
+	pushNetwork(hostname + "," + mac)
 
-	if t.Onit == localName {
-		t.Onit = ""
-	}
-
-	doBtOps("disconnect", t.Macs)
-}
-
-func connect(t *endpoint) {
-	t.Menu.Check()
-	t.Onit = localName
-
-	for n, l := range localEndpoints {
-		if l.Onit == localName && l.Excluding == t.Excluding {
-			disconnect(&l)
-			localEndpoints[n] = l
+	// only 1 audio device allowed at the same time, disconnect others
+	for macaddr, menu := range localEndpoints {
+		if menu.Checked() {
+			disconnect(macaddr, menu)
 		}
 	}
 
-	time.Sleep(800 * time.Millisecond)
-	doBtOps("connect", t.Macs)
-}
-
-func doBtOps(op string, macs []string) {
-	for _, mac := range macs {
-		doBtOp(op, mac, 1)
+	if doBtOpRepeat("connect", mac) {
+		m.Enable()
+		m.Check()
+		setBtAudio()
+	} else {
+		m.Enable()
+		m.Uncheck()
 	}
 }
 
-func doBtOp(op string, mac string, cnt int) {
-	fmt.Println("~~", op, cnt, mac)
-	cmd := exec.Command("bluetoothctl", op, mac)
-	stdout, err := cmd.Output()
-	fmt.Println("err", err, "stdout", string(stdout))
-	if err != nil && cnt < 10 {
+func doBtOpRepeat(arg ...string) bool {
+	fmt.Println("~~ bt op:", arg)
+	for i := 0; i < 10; i++ {
+		_, err := doBtOp(arg...)
+		if err == nil {
+			return true
+		}
 		time.Sleep(800 * time.Millisecond)
-		doBtOp(op, mac, cnt+1)
 	}
+	return false
 }
 
-func send() {
-	localStateMtx.Lock()
-	defer localStateMtx.Unlock()
+func doBtOp(arg ...string) (string, error) {
+	cmd := exec.Command("bluetoothctl", arg...)
+	stdout, err := cmd.Output()
+	return string(stdout), err
+}
 
-	jsonValue, err := json.Marshal(localEndpoints)
+func setBtAudio() {
+	cmd := exec.Command("pactl", "list", "short", "sinks")
+	stdout, err := cmd.Output()
 	if err != nil {
-		fmt.Println("error marshal local")
+		fmt.Println(err)
 		return
 	}
 
-	if string(jsonValue) == "{}" {
-		return
-	}
-
-	fmt.Println("++ sending state")
-	_, err = client.WriteTo(jsonValue, clientAddr)
-	if err != nil {
-		fmt.Println("err writing state", err)
+	for _, line := range strings.Split(string(stdout), "\n") {
+		sink := regexp.MustCompile(`bluez_sink\S+`).FindStringSubmatch(line)
+		if len(sink) > 0 {
+			fmt.Println("++ setting default audio to", sink)
+			cmd := exec.Command("pactl", "set-default-sink", sink[0])
+			_, err := cmd.Output()
+			if err != nil {
+				fmt.Println("fail set default bt audio", err)
+			}
+		}
 	}
 }
 
@@ -166,102 +122,125 @@ func startServer(serverPort string) {
 			fmt.Println("err reading server", err)
 		}
 
-		if string(buf[:n]) == "bluebao-ping" {
-			send()
+		req := strings.SplitN(string(buf[:n]), ",", 2)
+		requester, queriedMac := req[0], req[1]
+
+		fmt.Println("++ receiving query - wanted", req) //, string(buf[:n]))
+
+		if requester == hostname {
 			continue
 		}
 
-		fmt.Println("++ receiving remote state") //, string(buf[:n]))
-		merge(buf[:n])
+		localMtx.Lock()
+		m, ok := localEndpoints[queriedMac]
+		if ok && m.Checked() {
+			disconnect(queriedMac, m) // someone wants to take over that device, we drop it
+		}
+		localMtx.Unlock()
 	}
 }
 
-func startClient(multicastAddr string, clientPort string, serverPort string) {
-	var err error
-	client, err = net.ListenPacket("udp4", ":"+clientPort)
-	if err != nil {
-		panic(err)
-	}
-
-	clientAddr, err = net.ResolveUDPAddr("udp4", multicastAddr+":"+serverPort)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func readLocal(confPath string) {
-	if len(localEndpoints) != 0 {
-		return
-	}
-
-	payload, err := ioutil.ReadFile(confPath)
-	if err != nil {
-		panic(err)
-	}
-
-	merge(payload)
-}
-
-func pingNw(justOnce bool) {
-	for {
-		fmt.Println("~~ pinging network for state")
-
-		_, err := client.WriteTo([]byte("bluebao-ping"), clientAddr)
+func pushNetwork(payload string) {
+	for _, ip := range getBroadcasts() {
+		fmt.Println("++ sending", payload)
+		client, err := net.ListenPacket("udp4", ":"+*clientPort)
 		if err != nil {
-			fmt.Println("err writing", err)
+			fmt.Println("failed nw push", err)
+			return
 		}
 
-		time.Sleep(time.Second * 2)
+		serverAddr, err := net.ResolveUDPAddr("udp4", ip+":"+*serverPort)
+		if err != nil {
+			fmt.Println("failed nw push", err)
+			return
+		}
 
-		if justOnce || len(localEndpoints) != 0 {
+		_, err = client.WriteTo([]byte(payload), serverAddr)
+		if err != nil {
+			fmt.Println("failed nw push", err)
 			return
 		}
 	}
 }
 
-func startUI() {
+func startUI(uiReady chan bool) {
+	// recheck sometimes
+
 	onReady := func() {
 		systray.SetIcon(Icon)
-		systray.SetTitle("bluebao")
-		systray.SetTooltip("bluebao")
+		systray.SetTitle("")
+		systray.SetTooltip("")
 
-		systray.AddSeparator()
 		m := systray.AddMenuItem("quit", "quit")
+		systray.AddSeparator()
+
 		go func() {
 			for {
 				<-m.ClickedCh
 				panic("quit") // classy
 			}
 		}()
+
+		uiReady <- true
 	}
 
 	systray.Run(onReady, nil)
 }
 
-func main() {
-	var multicastAddr = flag.String("h", "192.168.0.255", "multicast address")
-	var clientPort = flag.String("cp", "8830", "client port")
-	var serverPort = flag.String("sp", "8829", "server port")
+func scanPairedDevices() {
+	fmt.Println("~~ scanning for avaiable devices")
 
-	var confPath = flag.String("c", "", "read config at path (optional if fetching from peers)")
+	output, _ := doBtOp("devices")
+	devices := strings.Split(output, "\n")
 
-	flag.Parse()
+	localMtx.Lock()
+	defer localMtx.Unlock()
 
-	localName, _ = os.Hostname()
-	localEndpoints = make(map[string]endpoint)
+	for _, device := range devices[:len(devices)-1] {
+		infos := strings.SplitN(device, " ", 3)
+		mac, name := infos[1], infos[2]
 
-	go startUI()
-	time.Sleep(100 * time.Millisecond)
-	startClient(*multicastAddr, *clientPort, *serverPort)
-	go startServer(*serverPort)
-
-	fmt.Printf("~~ bluebao starting, name %s\n\n", localName)
-	if *confPath != "" {
-		pingNw(true)
-		readLocal(*confPath)
-	} else {
-		go pingNw(false)
+		output, _ := doBtOp("info", mac)
+		connected := strings.Contains(output, "Connected: yes")
+		if strings.Contains(output, "Audio") {
+			localEndpoints[mac] = addUIEntry(name, mac)
+			if connected {
+				localEndpoints[mac].Check()
+			}
+		}
 	}
+}
+
+func getBroadcasts() []string {
+	cmd := exec.Command("ip", "addr", "show")
+	stdout, err := cmd.Output()
+	if err != nil {
+		panic("cant determine broadcast IP")
+	}
+
+	ips := make([]string, 0)
+	for _, line := range strings.Split(string(stdout), "\n") {
+		if strings.Contains(line, "brd") && strings.Contains(line, "inet") {
+			re := regexp.MustCompile(`brd\s+([0-9\.]+)`)
+			ip := re.FindStringSubmatch(line)[1]
+			ips = append(ips, ip)
+		}
+	}
+
+	return ips
+}
+
+func main() {
+	flag.Parse()
+	fmt.Printf("~~ bluebao starting\n\n")
+
+	doBtOp("power", "on")
+
+	uiReady := make(chan bool)
+	go startUI(uiReady)
+	<-uiReady
+	go startServer(*serverPort)
+	scanPairedDevices()
 
 	select {}
 }
