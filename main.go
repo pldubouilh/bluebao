@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,10 +16,9 @@ import (
 )
 
 type endpoint struct {
-	Macs      []string          `json:"macs"`
-	Excluding string            `json:"excluding"`
-	Onit      string            `json:"onit"`
-	Menu      *systray.MenuItem `json:"-"`
+	Mac  string            `json:"mac"`
+	Onit string            `json:"onit"`
+	Menu *systray.MenuItem `json:"-"`
 }
 
 var localEndpoints map[string]endpoint
@@ -53,8 +52,7 @@ func addUIEntry(name string) *systray.MenuItem {
 	return m
 }
 
-func merge(buf []byte) {
-
+func mergeBytes(buf []byte) {
 	remoteEndpoints := make(map[string]endpoint)
 	errMarshall := json.Unmarshal(buf, &remoteEndpoints)
 	if errMarshall != nil {
@@ -62,13 +60,16 @@ func merge(buf []byte) {
 		return
 	}
 
+	merge(remoteEndpoints)
+}
+
+func merge(remoteEndpoints map[string]endpoint) {
 	localStateMtx.Lock()
 	defer localStateMtx.Unlock()
 
 	for name, r := range remoteEndpoints {
 		l, ok := localEndpoints[name]
-		l.Macs = r.Macs
-		l.Excluding = r.Excluding
+		l.Mac = r.Mac
 
 		localConn := l.Onit == localName
 		shouldBeConned := r.Onit == localName
@@ -96,7 +97,7 @@ func disconnect(t *endpoint) {
 		t.Onit = ""
 	}
 
-	doBtOps("disconnect", t.Macs)
+	doBtOp(0, "disconnect", t.Mac)
 }
 
 func connect(t *endpoint) {
@@ -104,31 +105,25 @@ func connect(t *endpoint) {
 	t.Onit = localName
 
 	for n, l := range localEndpoints {
-		if l.Onit == localName && l.Excluding == t.Excluding {
+		if l.Onit == localName {
 			disconnect(&l)
 			localEndpoints[n] = l
 		}
 	}
 
 	time.Sleep(800 * time.Millisecond)
-	doBtOps("connect", t.Macs)
+	doBtOp(0, "connect", t.Mac)
 }
 
-func doBtOps(op string, macs []string) {
-	for _, mac := range macs {
-		doBtOp(op, mac, 1)
-	}
-}
-
-func doBtOp(op string, mac string, cnt int) {
-	fmt.Println("~~", op, cnt, mac)
-	cmd := exec.Command("bluetoothctl", op, mac)
+func doBtOp(cnt int, arg ...string) string {
+	cmd := exec.Command("bluetoothctl", arg...)
 	stdout, err := cmd.Output()
 	fmt.Println("err", err, "stdout", string(stdout))
 	if err != nil && cnt < 10 {
 		time.Sleep(800 * time.Millisecond)
-		doBtOp(op, mac, cnt+1)
+		return doBtOp(cnt+1, arg...)
 	}
+	return string(stdout)
 }
 
 func send() {
@@ -166,13 +161,8 @@ func startServer(serverPort string) {
 			fmt.Println("err reading server", err)
 		}
 
-		if string(buf[:n]) == "bluebao-ping" {
-			send()
-			continue
-		}
-
 		fmt.Println("++ receiving remote state") //, string(buf[:n]))
-		merge(buf[:n])
+		mergeBytes(buf[:n])
 	}
 }
 
@@ -186,36 +176,6 @@ func startClient(multicastAddr string, clientPort string, serverPort string) {
 	clientAddr, err = net.ResolveUDPAddr("udp4", multicastAddr+":"+serverPort)
 	if err != nil {
 		panic(err)
-	}
-}
-
-func readLocal(confPath string) {
-	if len(localEndpoints) != 0 {
-		return
-	}
-
-	payload, err := ioutil.ReadFile(confPath)
-	if err != nil {
-		panic(err)
-	}
-
-	merge(payload)
-}
-
-func pingNw(justOnce bool) {
-	for {
-		fmt.Println("~~ pinging network for state")
-
-		_, err := client.WriteTo([]byte("bluebao-ping"), clientAddr)
-		if err != nil {
-			fmt.Println("err writing", err)
-		}
-
-		time.Sleep(time.Second * 2)
-
-		if justOnce || len(localEndpoints) != 0 {
-			return
-		}
 	}
 }
 
@@ -238,12 +198,26 @@ func startUI() {
 	systray.Run(onReady, nil)
 }
 
+func scanPairedDevices() {
+	fmt.Println("~~ scanning for avaiable devices")
+
+	output := doBtOp(0, "devices")
+	devices := strings.Split(output, "\n")
+	pairedDevices := make(map[string]endpoint)
+
+	for _, device := range devices[:len(devices)-1] {
+		infos := strings.SplitN(device, " ", 3)
+		mac, name := infos[1], infos[2]
+		pairedDevices[name] = endpoint{mac, "", nil}
+	}
+
+	merge(pairedDevices)
+}
+
 func main() {
 	var multicastAddr = flag.String("h", "192.168.0.255", "multicast address")
 	var clientPort = flag.String("cp", "8830", "client port")
 	var serverPort = flag.String("sp", "8829", "server port")
-
-	var confPath = flag.String("c", "", "read config at path (optional if fetching from peers)")
 
 	flag.Parse()
 
@@ -256,12 +230,7 @@ func main() {
 	go startServer(*serverPort)
 
 	fmt.Printf("~~ bluebao starting, name %s\n\n", localName)
-	if *confPath != "" {
-		pingNw(true)
-		readLocal(*confPath)
-	} else {
-		go pingNw(false)
-	}
+	scanPairedDevices()
 
 	select {}
 }
