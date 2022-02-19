@@ -15,34 +15,12 @@ depends on `bluetoothctl` (at runtime) and `gtk3 libappindicator3` (for the buil
 
 % ./bluebao --help
 Usage of ./bluebao:
-  -c string
-        read config at path (optional if fetching from peers)
   -cp string
         client port (default "8830")
   -h string
         multicast address (default "192.168.0.255")
   -sp string
         server port (default "8829")
-```
-
-### config
-
-a config file is used to define the endpoints to be used. `excluding` in the config is here to indicate where a host can only connect one of those sinks (e.g. either `living room` of `headphones` can be simultaneously connected by a single host, connecting one will disconnect the other)
-
-```json
-{
-  "living room": {
-    "macs": ["AA:AA:AA:AA:AA:AA"],
-    "excluding": "sound"
-  },
-  "headphones": {
-    "macs": ["BB:BB:BB:BB:BB:BB"],
-    "excluding": "sound"
-  },
-  "kb": {
-    "macs": ["CC:CC:CC:CC:CC:CC"],
-  }
-}
 ```
 
 ### todo
