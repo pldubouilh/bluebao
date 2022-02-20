@@ -69,15 +69,13 @@ func merge(remoteEndpoints map[string]endpoint) {
 
 	for name, r := range remoteEndpoints {
 		l, ok := localEndpoints[name]
-		l.Mac = r.Mac
+
+		if !ok {
+			continue
+		}
 
 		localConn := l.Onit == localName
 		shouldBeConned := r.Onit == localName
-
-		if !ok {
-			fmt.Println("~~ new sink", name)
-			l.Menu = addUIEntry(name)
-		}
 
 		if localConn && !shouldBeConned {
 			disconnect(&l)
