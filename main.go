@@ -211,8 +211,8 @@ func scanPairedDevices() {
 
 		output := doBtOp(0, "info", mac)
 		if strings.Contains(output, "Audio") {
-			localEndpoints[name] = endpoint{mac, "", nil}
-			addUIEntry(name)
+			var ui = addUIEntry(name)
+			localEndpoints[name] = endpoint{mac, "", ui}
 		}
 	}
 }
