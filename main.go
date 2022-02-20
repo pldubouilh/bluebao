@@ -180,8 +180,8 @@ func startClient(multicastAddr string, clientPort string, serverPort string) {
 func startUI() {
 	onReady := func() {
 		systray.SetIcon(Icon)
-		systray.SetTitle("bluebao")
-		systray.SetTooltip("bluebao")
+		systray.SetTitle("")
+		systray.SetTooltip("")
 
 		systray.AddSeparator()
 		m := systray.AddMenuItem("quit", "quit")
@@ -201,15 +201,20 @@ func scanPairedDevices() {
 
 	output := doBtOp(0, "devices")
 	devices := strings.Split(output, "\n")
-	pairedDevices := make(map[string]endpoint)
+
+	localStateMtx.Lock()
+	defer localStateMtx.Unlock()
 
 	for _, device := range devices[:len(devices)-1] {
 		infos := strings.SplitN(device, " ", 3)
 		mac, name := infos[1], infos[2]
-		pairedDevices[name] = endpoint{mac, "", nil}
-	}
 
-	merge(pairedDevices)
+		output := doBtOp(0, "info", mac)
+		if strings.Contains(output, "Audio") {
+			localEndpoints[name] = endpoint{mac, "", nil}
+			addUIEntry(name)
+		}
+	}
 }
 
 func main() {
@@ -229,9 +234,9 @@ func main() {
 
 	go startUI()
 	time.Sleep(100 * time.Millisecond)
+
 	startClient(*multicastAddr, *clientPort, *serverPort)
 	go startServer(*serverPort)
-
 	fmt.Printf("~~ bluebao starting, name %s\n\n", localName)
 	scanPairedDevices()
 
