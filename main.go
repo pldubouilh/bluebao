@@ -221,6 +221,11 @@ func main() {
 
 	flag.Parse()
 
+	_, err := exec.Command("bluetoothctl", "power", "on").Output()
+	if err != nil {
+		panic(err)
+	}
+
 	localName, _ = os.Hostname()
 	localEndpoints = make(map[string]endpoint)
 
