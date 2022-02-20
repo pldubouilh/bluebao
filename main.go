@@ -16,34 +16,34 @@ import (
 )
 
 type endpoint struct {
-	Mac  string            `json:"mac"`
 	Onit string            `json:"onit"`
 	Menu *systray.MenuItem `json:"-"`
 }
 
+// find endpoint per mac addess
 var localEndpoints map[string]endpoint
 var localStateMtx sync.Mutex
-var localName string
+var hostname string
 
 var client net.PacketConn
 var clientAddr *net.UDPAddr
 
-func addUIEntry(name string) *systray.MenuItem {
+func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
 
 	go func() {
 		for {
 			<-m.ClickedCh
 			localStateMtx.Lock()
-			l := localEndpoints[name]
+			l := localEndpoints[mac]
 
 			if m.Checked() {
-				disconnect(&l)
+				disconnect(mac, &l)
 			} else {
-				connect(&l)
+				connect(mac, &l)
 			}
 
-			localEndpoints[name] = l
+			localEndpoints[mac] = l
 			localStateMtx.Unlock()
 			send()
 		}
@@ -52,7 +52,7 @@ func addUIEntry(name string) *systray.MenuItem {
 	return m
 }
 
-func mergeBytes(buf []byte) {
+func merge(buf []byte) {
 	remoteEndpoints := make(map[string]endpoint)
 	errMarshall := json.Unmarshal(buf, &remoteEndpoints)
 	if errMarshall != nil {
@@ -60,57 +60,55 @@ func mergeBytes(buf []byte) {
 		return
 	}
 
-	merge(remoteEndpoints)
-}
-
-func merge(remoteEndpoints map[string]endpoint) {
 	localStateMtx.Lock()
 	defer localStateMtx.Unlock()
 
-	for name, r := range remoteEndpoints {
-		l, ok := localEndpoints[name]
+	for mac, r := range remoteEndpoints {
+		l, ok := localEndpoints[mac]
 
 		if !ok {
 			continue
 		}
 
-		localConn := l.Onit == localName
-		shouldBeConned := r.Onit == localName
+		localConn := l.Onit == hostname
+		shouldBeConned := r.Onit == hostname
 
+		// remote instruction received
 		if localConn && !shouldBeConned {
-			disconnect(&l)
+			disconnect(mac, &l)
 		} else if !localConn && shouldBeConned {
-			connect(&l)
+			connect(mac, &l)
 		}
 
 		l.Onit = r.Onit
-		localEndpoints[name] = l
+		localEndpoints[mac] = l
 	}
 }
 
-func disconnect(t *endpoint) {
+func disconnect(mac string, t *endpoint) {
 	t.Menu.Uncheck()
 
-	if t.Onit == localName {
+	if t.Onit == hostname {
 		t.Onit = ""
 	}
 
-	doBtOp(0, "disconnect", t.Mac)
+	doBtOp(0, "disconnect", mac)
 }
 
-func connect(t *endpoint) {
+func connect(mac string, t *endpoint) {
 	t.Menu.Check()
-	t.Onit = localName
+	t.Onit = hostname
 
+	// only 1 audio device allowed at the same time
 	for n, l := range localEndpoints {
-		if l.Onit == localName {
-			disconnect(&l)
+		if l.Onit == hostname {
+			disconnect(mac, &l)
 			localEndpoints[n] = l
 		}
 	}
 
 	time.Sleep(800 * time.Millisecond)
-	doBtOp(0, "connect", t.Mac)
+	doBtOp(0, "connect", mac)
 }
 
 func doBtOp(cnt int, arg ...string) string {
@@ -160,7 +158,7 @@ func startServer(serverPort string) {
 		}
 
 		fmt.Println("++ receiving remote state") //, string(buf[:n]))
-		mergeBytes(buf[:n])
+		merge(buf[:n])
 	}
 }
 
@@ -211,8 +209,8 @@ func scanPairedDevices() {
 
 		output := doBtOp(0, "info", mac)
 		if strings.Contains(output, "Audio") {
-			var ui = addUIEntry(name)
-			localEndpoints[name] = endpoint{mac, "", ui}
+			var ui = addUIEntry(name, mac)
+			localEndpoints[mac] = endpoint{"", ui}
 		}
 	}
 }
@@ -224,12 +222,9 @@ func main() {
 
 	flag.Parse()
 
-	_, err := exec.Command("bluetoothctl", "power", "on").Output()
-	if err != nil {
-		panic(err)
-	}
+	doBtOp(0, "power", "on")
 
-	localName, _ = os.Hostname()
+	hostname, _ = os.Hostname()
 	localEndpoints = make(map[string]endpoint)
 
 	go startUI()
@@ -237,7 +232,7 @@ func main() {
 
 	startClient(*multicastAddr, *clientPort, *serverPort)
 	go startServer(*serverPort)
-	fmt.Printf("~~ bluebao starting, name %s\n\n", localName)
+	fmt.Printf("~~ bluebao starting, name %s\n\n", hostname)
 	scanPairedDevices()
 
 	select {}
