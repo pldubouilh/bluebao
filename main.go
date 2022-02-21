@@ -21,35 +21,33 @@ type endpoint struct {
 }
 
 // find endpoint per mac addess
-var localEndpoints map[string]endpoint
+var localEndpoints map[string]*endpoint
 var localStateMtx sync.Mutex
 var hostname string
 
 var client net.PacketConn
 var clientAddr *net.UDPAddr
 
-func addUIEntry(name string, mac string) *systray.MenuItem {
+func addUIEntry(name string, mac string) *endpoint {
 	m := systray.AddMenuItemCheckbox(name, name, false)
+	entry := endpoint{"", m}
 
 	go func() {
 		for {
 			<-m.ClickedCh
 			localStateMtx.Lock()
-			l := localEndpoints[mac]
 
 			if m.Checked() {
-				disconnect(mac, &l)
+				disconnect(true, mac, &entry)
 			} else {
-				connect(mac, &l)
+				connect(true, mac, &entry)
 			}
 
-			localEndpoints[mac] = l
 			localStateMtx.Unlock()
-			send()
 		}
 	}()
 
-	return m
+	return &entry
 }
 
 func merge(buf []byte) {
@@ -75,57 +73,60 @@ func merge(buf []byte) {
 
 		// remote instruction received
 		if localConn && !shouldBeConned {
-			disconnect(mac, &l)
+			disconnect(false, mac, l)
 		} else if !localConn && shouldBeConned {
-			connect(mac, &l)
+			connect(false, mac, l)
 		}
-
-		l.Onit = r.Onit
-		localEndpoints[mac] = l
 	}
 }
 
-func disconnect(mac string, t *endpoint) {
+func disconnect(emit_state bool, mac string, t *endpoint) {
 	t.Menu.Uncheck()
-
-	if t.Onit == hostname {
-		t.Onit = ""
+	t.Onit = ""
+	if emit_state {
+		send()
 	}
-
-	doBtOp(0, "disconnect", mac)
+	doBtOpRepeat("disconnect", mac)
 }
 
-func connect(mac string, t *endpoint) {
+func connect(emit_state bool, mac string, t *endpoint) {
 	t.Menu.Check()
-	t.Onit = hostname
 
-	// only 1 audio device allowed at the same time
-	for n, l := range localEndpoints {
-		if l.Onit == hostname {
-			disconnect(mac, &l)
-			localEndpoints[n] = l
+	// only 1 audio device allowed at the same time, disconnect others
+	for otherMac, e := range localEndpoints {
+		if otherMac != mac && e.Onit == hostname {
+			disconnect(false, otherMac, e)
 		}
 	}
 
-	time.Sleep(800 * time.Millisecond)
-	doBtOp(0, "connect", mac)
+	t.Onit = hostname
+	if emit_state {
+		send()
+	}
+	doBtOpRepeat("connect", mac)
 }
 
-func doBtOp(cnt int, arg ...string) string {
+func doBtOpRepeat(arg ...string) (string, error) {
+	var err error = nil
+	var ret string
+	for i := 0; i < 10; i++ {
+		ret, err = doBtOp(arg...)
+		if err == nil {
+			break
+		}
+		time.Sleep(800 * time.Millisecond)
+	}
+	return ret, err
+}
+
+func doBtOp(arg ...string) (string, error) {
 	cmd := exec.Command("bluetoothctl", arg...)
 	stdout, err := cmd.Output()
-	fmt.Println("err", err, "stdout", string(stdout))
-	if err != nil && cnt < 10 {
-		time.Sleep(800 * time.Millisecond)
-		return doBtOp(cnt+1, arg...)
-	}
-	return string(stdout)
+	// fmt.Println("err", err, "stdout", string(stdout))
+	return string(stdout), err
 }
 
 func send() {
-	localStateMtx.Lock()
-	defer localStateMtx.Unlock()
-
 	jsonValue, err := json.Marshal(localEndpoints)
 	if err != nil {
 		fmt.Println("error marshal local")
@@ -197,7 +198,7 @@ func startUI() {
 func scanPairedDevices() {
 	fmt.Println("~~ scanning for avaiable devices")
 
-	output := doBtOp(0, "devices")
+	output, _ := doBtOp("devices")
 	devices := strings.Split(output, "\n")
 
 	localStateMtx.Lock()
@@ -207,10 +208,9 @@ func scanPairedDevices() {
 		infos := strings.SplitN(device, " ", 3)
 		mac, name := infos[1], infos[2]
 
-		output := doBtOp(0, "info", mac)
+		output, _ := doBtOp("info", mac)
 		if strings.Contains(output, "Audio") {
-			var ui = addUIEntry(name, mac)
-			localEndpoints[mac] = endpoint{"", ui}
+			localEndpoints[mac] = addUIEntry(name, mac)
 		}
 	}
 }
@@ -221,18 +221,19 @@ func main() {
 	var serverPort = flag.String("sp", "8829", "server port")
 
 	flag.Parse()
+	fmt.Printf("~~ bluebao starting, name %s\n\n", hostname)
 
-	doBtOp(0, "power", "on")
+	doBtOp("power", "on")
 
 	hostname, _ = os.Hostname()
-	localEndpoints = make(map[string]endpoint)
+	localEndpoints = make(map[string]*endpoint)
 
 	go startUI()
 	time.Sleep(100 * time.Millisecond)
 
 	startClient(*multicastAddr, *clientPort, *serverPort)
 	go startServer(*serverPort)
-	fmt.Printf("~~ bluebao starting, name %s\n\n", hostname)
+
 	scanPairedDevices()
 
 	select {}
