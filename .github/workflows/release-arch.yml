@@ -1,0 +1,31 @@
+name: release
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+    - name: checkout
+      uses: actions/checkout@v3
+
+    - name: setup
+      run: |
+        pacman -Sy
+        pacman --noconfirm -S gcc gtk3 libappindicator-gtk3 go make pkgconf
+
+    - name: run
+      run: make build
+
+    - name: upload
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: bluebao
+        asset_name: bluebao-arch
+        tag: latest
+        overwrite: true
+
