@@ -19,8 +19,8 @@ var localEndpoints = make(map[string]*systray.MenuItem)
 var localMtx sync.Mutex
 
 var hostname, _ = os.Hostname()
-var clientPort = flag.String("cp", "8830", "client port")
 var serverPort = flag.String("sp", "8829", "server port")
+var disableNetwork = flag.Bool("d", false, "disable network feature")
 
 func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
@@ -44,8 +44,9 @@ func addUIEntry(name string, mac string) *systray.MenuItem {
 }
 
 func disconnect(mac string, m *systray.MenuItem) {
-	m.Uncheck()
-	doBtOpRepeat("disconnect", mac)
+	if btOptOutOk("disconnect", mac) {
+		m.Uncheck()
+	}
 }
 
 func connect(mac string, m *systray.MenuItem) {
@@ -59,35 +60,29 @@ func connect(mac string, m *systray.MenuItem) {
 		}
 	}
 
-	if doBtOpRepeat("connect", mac) {
-		m.Enable()
+	if btOptOutOk("connect", mac) {
 		m.Check()
-		setBtAudio()
-	} else {
-		m.Enable()
-		m.Uncheck()
+		go setBtAudio()
 	}
+
+	m.Enable()
 }
 
-func doBtOpRepeat(arg ...string) bool {
-	fmt.Println("~~ bt op:", arg)
-	for i := 0; i < 10; i++ {
-		_, err := doBtOp(arg...)
-		if err == nil {
-			return true
-		}
-		time.Sleep(800 * time.Millisecond)
-	}
-	return false
-}
-
-func doBtOp(arg ...string) (string, error) {
+func btOptOut(arg ...string) (string, error) {
 	cmd := exec.Command("bluetoothctl", arg...)
 	stdout, err := cmd.Output()
+	fmt.Printf("~~ bluetoothctl (ok: %t) ", err == nil)
+	fmt.Println(arg)
 	return string(stdout), err
 }
 
+func btOptOutOk(arg ...string) bool {
+	_, err := btOptOut(arg...)
+	return err == nil
+}
+
 func setBtAudio() {
+	time.Sleep(500 * time.Millisecond)
 	cmd := exec.Command("pactl", "list", "short", "sinks")
 	stdout, err := cmd.Output()
 	if err != nil {
@@ -98,7 +93,7 @@ func setBtAudio() {
 	for _, line := range strings.Split(string(stdout), "\n") {
 		sink := regexp.MustCompile(`bluez_sink\S+`).FindStringSubmatch(line)
 		if len(sink) > 0 {
-			fmt.Println("++ setting default audio to", sink)
+			fmt.Println("~~ setting default audio to", sink)
 			cmd := exec.Command("pactl", "set-default-sink", sink[0])
 			_, err := cmd.Output()
 			if err != nil {
@@ -108,8 +103,12 @@ func setBtAudio() {
 	}
 }
 
-func startServer(serverPort string) {
-	pc, err := net.ListenPacket("udp4", ":"+serverPort)
+func startServer() {
+	if *disableNetwork {
+		return
+	}
+
+	pc, err := net.ListenPacket("udp4", ":"+*serverPort)
 	if err != nil {
 		panic(err)
 	}
@@ -125,12 +124,11 @@ func startServer(serverPort string) {
 		req := strings.SplitN(string(buf[:n]), ",", 2)
 		requester, queriedMac := req[0], req[1]
 
-		fmt.Println("++ receiving query - wanted", req) //, string(buf[:n]))
-
 		if requester == hostname {
 			continue
 		}
 
+		fmt.Println("~~ receiving query", req) //, string(buf[:n]))
 		localMtx.Lock()
 		m, ok := localEndpoints[queriedMac]
 		if ok && m.Checked() {
@@ -141,31 +139,23 @@ func startServer(serverPort string) {
 }
 
 func pushNetwork(payload string) {
+	if *disableNetwork {
+		return
+	}
+
 	for _, ip := range getBroadcasts() {
-		fmt.Println("++ sending", payload)
-		client, err := net.ListenPacket("udp4", ":"+*clientPort)
+		fmt.Println("~~ broadcasting", payload)
+		conn, err := net.Dial("udp4", ip+":"+*serverPort)
 		if err != nil {
 			fmt.Println("failed nw push", err)
-			return
 		}
 
-		serverAddr, err := net.ResolveUDPAddr("udp4", ip+":"+*serverPort)
-		if err != nil {
-			fmt.Println("failed nw push", err)
-			return
-		}
-
-		_, err = client.WriteTo([]byte(payload), serverAddr)
-		if err != nil {
-			fmt.Println("failed nw push", err)
-			return
-		}
+		conn.Write([]byte(payload))
+		conn.Close()
 	}
 }
 
 func startUI(uiReady chan bool) {
-	// recheck sometimes
-
 	onReady := func() {
 		systray.SetIcon(Icon)
 		systray.SetTitle("")
@@ -190,7 +180,7 @@ func startUI(uiReady chan bool) {
 func scanPairedDevices() {
 	fmt.Println("~~ scanning for avaiable devices")
 
-	output, _ := doBtOp("devices")
+	output, _ := btOptOut("devices")
 	devices := strings.Split(output, "\n")
 
 	localMtx.Lock()
@@ -200,7 +190,7 @@ func scanPairedDevices() {
 		infos := strings.SplitN(device, " ", 3)
 		mac, name := infos[1], infos[2]
 
-		output, _ := doBtOp("info", mac)
+		output, _ := btOptOut("info", mac)
 		connected := strings.Contains(output, "Connected: yes")
 		if strings.Contains(output, "Audio") {
 			localEndpoints[mac] = addUIEntry(name, mac)
@@ -215,7 +205,7 @@ func getBroadcasts() []string {
 	cmd := exec.Command("ip", "addr", "show")
 	stdout, err := cmd.Output()
 	if err != nil {
-		panic("cant determine broadcast IP")
+		fmt.Println("cant determine broadcast IPs")
 	}
 
 	ips := make([]string, 0)
@@ -231,15 +221,21 @@ func getBroadcasts() []string {
 }
 
 func main() {
-	flag.Parse()
-	fmt.Printf("~~ bluebao starting\n\n")
+	flag.Usage = func() {
+		fmt.Println("🥟 bluebao\nA simple bluetooth audio devices manager, that supports local network broadcasting")
+		fmt.Println("to easily manage multiple devices on an bluetooth audio sink.")
+		fmt.Println()
+		flag.PrintDefaults()
+	}
 
-	doBtOp("power", "on")
+	flag.Parse()
+	fmt.Println("~~ bluebao starting")
+	btOptOut("power", "on")
 
 	uiReady := make(chan bool)
 	go startUI(uiReady)
 	<-uiReady
-	go startServer(*serverPort)
+	go startServer()
 	scanPairedDevices()
 
 	select {}
