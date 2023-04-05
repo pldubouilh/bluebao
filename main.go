@@ -60,6 +60,9 @@ func connect(mac string, m *systray.MenuItem) {
 		}
 	}
 
+	// allow for network propagation
+	time.Sleep(200 * time.Millisecond)
+
 	if btOptOutOk("connect", mac) {
 		m.Check()
 		go setBtAudio()
@@ -81,25 +84,35 @@ func btOptOutOk(arg ...string) bool {
 	return err == nil
 }
 
-func setBtAudio() {
-	time.Sleep(500 * time.Millisecond)
-	cmd := exec.Command("pactl", "list", "short", "sinks")
-	stdout, err := cmd.Output()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
+func getBtSink() *string {
+	c := exec.Command("pactl", "list", "short", "sinks")
+	stdout, _ := c.Output()
 	for _, line := range strings.Split(string(stdout), "\n") {
 		sink := regexp.MustCompile(`bluez_sink\S+`).FindStringSubmatch(line)
 		if len(sink) > 0 {
-			fmt.Println("~~ setting default audio to", sink)
-			cmd := exec.Command("pactl", "set-default-sink", sink[0])
-			_, err := cmd.Output()
-			if err != nil {
-				fmt.Println("fail set default bt audio", err)
-			}
+			return &sink[0]
 		}
+	}
+	return nil
+}
+
+func setBtAudio() {
+	for i := 0; i < 20; i++ {
+		sink := getBtSink()
+
+		if sink == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		fmt.Println("~~ setting default audio to", *sink)
+		cmd := exec.Command("pactl", "set-default-sink", *sink)
+		_, err := cmd.Output()
+		if err != nil {
+			fmt.Println("fail set default bt audio", err)
+		}
+
+		return
 	}
 }
 
@@ -128,7 +141,8 @@ func startServer() {
 			continue
 		}
 
-		fmt.Println("~~ receiving query", req) //, string(buf[:n]))
+		// fmt.Println("~~ receiving query", req) //, string(buf[:n]))
+
 		localMtx.Lock()
 		m, ok := localEndpoints[queriedMac]
 		if ok && m.Checked() {
