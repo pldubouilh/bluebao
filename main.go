@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -20,7 +22,7 @@ var localMtx sync.Mutex
 
 var hostname, _ = os.Hostname()
 var serverPort = flag.String("sp", "8829", "server port")
-var disableNetwork = flag.Bool("d", false, "disable network feature")
+var enableNetwork = flag.Bool("d", false, "disable network feature")
 
 func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
@@ -44,6 +46,7 @@ func addUIEntry(name string, mac string) *systray.MenuItem {
 }
 
 func disconnect(mac string, m *systray.MenuItem) {
+	go setDefaultAudio("Headphones")
 	if btOptOutOk("disconnect", mac) {
 		m.Uncheck()
 	}
@@ -65,7 +68,7 @@ func connect(mac string, m *systray.MenuItem) {
 
 	if btOptOutOk("connect", mac) {
 		m.Check()
-		go setBtAudio()
+		go setDefaultAudio("bluez")
 	}
 
 	m.Enable()
@@ -74,8 +77,8 @@ func connect(mac string, m *systray.MenuItem) {
 func btOptOut(arg ...string) (string, error) {
 	cmd := exec.Command("bluetoothctl", arg...)
 	stdout, err := cmd.Output()
-	fmt.Printf("~~ bluetoothctl (ok: %t) ", err == nil)
-	fmt.Println(arg)
+	fmt.Println("> bluetoothctl", arg)
+	fmt.Println("<", string(stdout), err)
 	return string(stdout), err
 }
 
@@ -84,40 +87,66 @@ func btOptOutOk(arg ...string) bool {
 	return err == nil
 }
 
-func getBtSink() *string {
-	c := exec.Command("pactl", "list", "short", "sinks")
-	stdout, _ := c.Output()
-	for _, line := range strings.Split(string(stdout), "\n") {
-		sink := regexp.MustCompile(`bluez_sink\S+`).FindStringSubmatch(line)
-		if len(sink) > 0 {
-			return &sink[0]
-		}
+func find(input string, entryType string) *string {
+	type output struct {
+		Name string `json:"name"`
+		// other fields are ignored
 	}
-	return nil
-}
 
-func setBtAudio() {
 	for i := 0; i < 20; i++ {
-		sink := getBtSink()
-
-		if sink == nil {
-			time.Sleep(200 * time.Millisecond)
+		c := exec.Command("pactl", "-f", "json", "list", "short", entryType)
+		stdout, _ := c.Output()
+		var out []output
+		if err := json.Unmarshal(stdout, &out); err != nil {
+			log.Printf("Error parsing JSON: %v\n", err)
 			continue
 		}
 
-		fmt.Println("~~ setting default audio to", *sink)
-		cmd := exec.Command("pactl", "set-default-sink", *sink)
-		_, err := cmd.Output()
-		if err != nil {
-			fmt.Println("fail set default bt audio", err)
+		for _, s := range out {
+			if strings.Contains(s.Name, input) {
+				return &s.Name
+			}
 		}
 
+		time.Sleep(200 * time.Millisecond)
+		continue // retry
+	}
+
+	log.Printf("Failed to find %s\n", input)
+	return nil
+}
+
+func setDefaultAudio(input string) {
+	fmt.Println("trying to set default audio to", input)
+	sink := find(input, "sinks")
+	if sink == nil {
 		return
+	}
+
+	fmt.Println("~~ setting default audio to", sink)
+	cmd := exec.Command("pactl", "set-default-sink", *sink)
+	_, err := cmd.Output()
+	if err != nil {
+		fmt.Println("failed to set default bt audio", err)
+	} else {
+		fmt.Println("~~ default audio set to", sink)
+	}
+}
+
+func setProfile(profile string) {
+	card := find("bluez", "cards")
+	if card == nil {
+		return
+	}
+	cmd := exec.Command("pactl", "set-card-profile", *card, profile)
+	_, err := cmd.Output()
+	if err != nil {
+		fmt.Println("failed to set audio profile", err)
 	}
 }
 
 func startServer() {
-	if *disableNetwork {
+	if !*enableNetwork {
 		return
 	}
 
@@ -153,7 +182,7 @@ func startServer() {
 }
 
 func pushNetwork(payload string) {
-	if *disableNetwork {
+	if !*enableNetwork {
 		return
 	}
 
@@ -175,13 +204,30 @@ func startUI(uiReady chan bool) {
 		systray.SetTitle("")
 		systray.SetTooltip("")
 
-		m := systray.AddMenuItem("quit", "quit")
+		menuQuit := systray.AddMenuItem("Quit", "Quit")
+		audioProfile := systray.AddMenuItem("Audio profile", "Audio profile")
+		menuHq := audioProfile.AddSubMenuItem("High Quality", "High Quality")
+		menuHeadset := audioProfile.AddSubMenuItem("Headset + Microphone", "Headset + Microphone")
+
 		systray.AddSeparator()
 
 		go func() {
 			for {
-				<-m.ClickedCh
-				panic("quit") // classy
+				<-menuQuit.ClickedCh
+				systray.Quit()
+			}
+		}()
+
+		go func() {
+			for {
+				<-menuHq.ClickedCh
+				setProfile("a2dp-sink")
+			}
+		}()
+		go func() {
+			for {
+				<-menuHeadset.ClickedCh
+				setProfile("headset-head-unit")
 			}
 		}()
 
@@ -236,8 +282,7 @@ func getBroadcasts() []string {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Println("🥟 bluebao\nA simple bluetooth audio devices manager, that supports local network broadcasting")
-		fmt.Println("to easily manage multiple devices on an bluetooth audio sink.")
+		fmt.Println("🥟 bluebao\nA simple bluetooth audio devices manager to easily manage multiple devices.")
 		fmt.Println()
 		flag.PrintDefaults()
 	}

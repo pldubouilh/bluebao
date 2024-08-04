@@ -2,11 +2,15 @@ name: release
 on:
   push:
     branches: [ main ]
+  schedule:
+    # Daily at 13:59
+    - cron: '13 59 * * *'
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    container: ubuntu:rolling
     steps:
     - name: checkout
       uses: actions/checkout@v3
@@ -24,7 +28,7 @@ jobs:
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
         file: bluebao
-        asset_name: bluebao-ubuntu
+        asset_name: bluebao-ubuntu-latest
         tag: latest
         overwrite: true
 
