@@ -1,10 +1,7 @@
-name: release
+name: release-arch
 on:
   push:
     branches: [ main ]
-  schedule:
-    # Daily at 13:59
-    - cron: '13 59 * * *'
 
 jobs:
   build:
