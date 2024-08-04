@@ -4,6 +4,9 @@ build::
 	go mod download
 	go build ${FLAGS} -o bluebao
 
+install:: build
+	sudo cp bluebao /usr/bin
+
 run:: build
 	./bluebao
 
