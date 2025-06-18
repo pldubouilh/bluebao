@@ -21,8 +21,8 @@ var localEndpoints = make(map[string]*systray.MenuItem)
 var localMtx sync.Mutex
 
 var hostname, _ = os.Hostname()
-var serverPort = flag.String("sp", "8829", "server port")
-var enableNetwork = flag.Bool("d", false, "disable network feature")
+var enableNetwork = flag.Bool("nw", false, "enable network feature")
+var serverPort = flag.String("sp", "8829", "network server port")
 
 func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
@@ -149,6 +149,7 @@ func startServer() {
 	if !*enableNetwork {
 		return
 	}
+	fmt.Println("~~ starting network server on port", *serverPort)
 
 	pc, err := net.ListenPacket("udp4", ":"+*serverPort)
 	if err != nil {
@@ -214,10 +215,11 @@ func startUI(uiReady chan bool) {
 		go func() {
 			for {
 				<-menuQuit.ClickedCh
+				fmt.Println("~~ quitting")
 				systray.Quit()
+				os.Exit(0)
 			}
 		}()
-
 		go func() {
 			for {
 				<-menuHq.ClickedCh
@@ -246,8 +248,12 @@ func scanPairedDevices() {
 	localMtx.Lock()
 	defer localMtx.Unlock()
 
-	for _, device := range devices[:len(devices)-1] {
-		infos := strings.SplitN(device, " ", 3)
+	for _, line := range devices[:len(devices)-1] {
+		if !strings.Contains(line, "Device ") {
+			continue // skip non-device lines
+		}
+
+		infos := strings.SplitN(line, " ", 3)
 		mac, name := infos[1], infos[2]
 
 		output, _ := btOptOut("info", mac)
