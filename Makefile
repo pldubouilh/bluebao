@@ -1,4 +1,6 @@
-FLAGS := -ldflags "-s -w" -trimpath
+VERS := $(shell git rev-parse --short HEAD)
+
+FLAGS := -ldflags "-s -w -X main.version=${VERS}" -trimpath
 
 build::
 	go mod download

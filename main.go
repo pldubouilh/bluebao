@@ -21,8 +21,11 @@ var localEndpoints = make(map[string]*systray.MenuItem)
 var localMtx sync.Mutex
 
 var hostname, _ = os.Hostname()
+var version = "undefined"
+
 var enableNetwork = flag.Bool("nw", false, "enable network feature")
-var serverPort = flag.String("sp", "8829", "network server port")
+var serverPort = flag.String("port", "8829", "network server port")
+var debug = flag.Bool("debug", false, "debug bluetoothctl commands")
 
 func addUIEntry(name string, mac string) *systray.MenuItem {
 	m := systray.AddMenuItemCheckbox(name, name, false)
@@ -77,8 +80,10 @@ func connect(mac string, m *systray.MenuItem) {
 func btOptOut(arg ...string) (string, error) {
 	cmd := exec.Command("bluetoothctl", arg...)
 	stdout, err := cmd.Output()
-	fmt.Println("> bluetoothctl", arg)
-	fmt.Println("<", string(stdout), err)
+	if *debug {
+		fmt.Println("> bluetoothctl", arg)
+		fmt.Println("<", string(stdout), err)
+	}
 	return string(stdout), err
 }
 
@@ -117,7 +122,7 @@ func find(input string, entryType string) *string {
 }
 
 func setDefaultAudio(input string) {
-	fmt.Println("trying to set default audio to", input)
+	fmt.Println("~~ trying to set default audio to", input)
 	sink := find(input, "sinks")
 	if sink == nil {
 		return
@@ -240,8 +245,6 @@ func startUI(uiReady chan bool) {
 }
 
 func scanPairedDevices() {
-	fmt.Println("~~ scanning for avaiable devices")
-
 	output, _ := btOptOut("devices")
 	devices := strings.Split(output, "\n")
 
@@ -249,19 +252,25 @@ func scanPairedDevices() {
 	defer localMtx.Unlock()
 
 	for _, line := range devices[:len(devices)-1] {
-		if !strings.Contains(line, "Device ") {
+		// e.g. Device xx:xx:xx:xx:xx:xx AirPods Pro
+		if !strings.HasPrefix(line, "Device ") {
 			continue // skip non-device lines
 		}
-
 		infos := strings.SplitN(line, " ", 3)
 		mac, name := infos[1], infos[2]
 
 		output, _ := btOptOut("info", mac)
-		connected := strings.Contains(output, "Connected: yes")
-		if strings.Contains(output, "Audio") {
-			localEndpoints[mac] = addUIEntry(name, mac)
-			if connected {
+		isAudio := strings.Contains(output, "Audio")
+		isConnected := strings.Contains(output, "Connected: yes")
+		if isAudio {
+			if localEndpoints[mac] == nil {
+				localEndpoints[mac] = addUIEntry(name, mac)
+			}
+			if isConnected && !localEndpoints[mac].Checked() {
 				localEndpoints[mac].Check()
+			}
+			if !isConnected && localEndpoints[mac].Checked() {
+				localEndpoints[mac].Uncheck()
 			}
 		}
 	}
@@ -288,7 +297,8 @@ func getBroadcasts() []string {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Println("🥟 bluebao\nA simple bluetooth audio devices manager to easily manage multiple devices.")
+		fmt.Println("🥟 Bluebao\nA simple bluetooth audio devices manager to easily manage multiple devices.")
+		fmt.Println("Version:", version)
 		fmt.Println()
 		flag.PrintDefaults()
 	}
@@ -300,8 +310,13 @@ func main() {
 	uiReady := make(chan bool)
 	go startUI(uiReady)
 	<-uiReady
+	go func() {
+		for {
+			scanPairedDevices()
+			time.Sleep(2 * time.Second) // rescan every now and then
+		}
+	}()
 	go startServer()
-	scanPairedDevices()
 
 	select {}
 }
